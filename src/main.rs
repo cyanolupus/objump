@@ -1,66 +1,67 @@
 use std::{
-    collections::HashMap,
-    io::{self, Write},
+    borrow::BorrowMut, collections::HashMap, io::{self, Write}
 };
+use rusqlite::{self, Connection, Params, Statement};
 
-mod objdump;
+#[derive(Debug)]
+struct Person {
+    id: i64,
+    name: String,
+    data: Option<Vec<u8>>,
+}
 
-fn main() -> Result<(), ObjumpError> {
-    let mut opecodemap: HashMap<String, String> = std::collections::HashMap::new();
-    for line in io::stdin().lines() {
-        match objdump::line::parse_objdump_line(&line?) {
-            Ok(objdump::line::ObjDumpLineType::Instruction(instruction)) => match instruction.instruction.opcode {
-                objdump::x8664_att::X8664ATTOpcode::Unknown(opcode) => {
-                    if opecodemap.insert(opcode.clone(), capitalize(&opcode)) == None {
-                        println!(
-                            "\t\"{}\" => X8664ATTOpcode::{},",
-                            opcode,
-                            capitalize(&opcode)
-                        );
-                        eprintln!("\t{},", capitalize(&opcode));
-                        io::stdout().flush().unwrap();
-                        io::stderr().flush().unwrap();
-                    }
-                }
-                _ => {}
-            },
-            _ => {}
+impl TryFrom<&rusqlite::Row<'_>> for Person {
+    type Error = rusqlite::Error;
+
+    fn try_from(row: &rusqlite::Row) -> rusqlite::Result<Person> {
+        Ok(Person {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            data: row.get(2)?,
+        })
+    }
+}
+
+fn main() -> Result<(), rusqlite::Error> {
+    let conn = rusqlite::Connection::open("test.db")?;
+
+    let mut stmts = (0..10).map(|i| {
+        conn.prepare("select id, name, data from person where id < ?1 and id >= ?2").unwrap()
+    }).collect::<Vec<Statement>>();
+
+    let mut person_iter_map = HashMap::new();
+
+    for (i, stmt) in stmts.iter_mut().enumerate() {
+        let person_iter = PersonIterator::new(stmt, ((i+1)*10, i*10));
+        person_iter_map.insert(i, person_iter);
+    }
+
+    for (i, person_iter) in person_iter_map {
+        println!("Found person {:?}", i);
+        for person in person_iter {
+            println!("{:?}", person);
         }
     }
 
     Ok(())
 }
 
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        None => String::new(),
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+struct PersonIterator<'conn> {
+    rows: rusqlite::Rows<'conn>,
+}
+
+impl<'conn> Iterator for PersonIterator<'conn> {
+    type Item = Person;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.rows.next().ok()??.try_into().ok()?)
     }
 }
 
-#[derive(Debug)]
-enum ObjumpError {
-    ParseError(std::num::ParseIntError),
-    RegexError(regex::Error),
-    InvalidInstruction(String),
-    IOError(io::Error),
-}
-
-impl From<regex::Error> for ObjumpError {
-    fn from(err: regex::Error) -> Self {
-        ObjumpError::RegexError(err)
-    }
-}
-
-impl From<std::num::ParseIntError> for ObjumpError {
-    fn from(err: std::num::ParseIntError) -> Self {
-        ObjumpError::ParseError(err)
-    }
-}
-
-impl From<io::Error> for ObjumpError {
-    fn from(err: io::Error) -> Self {
-        ObjumpError::IOError(err)
+impl<'conn> PersonIterator<'conn> {
+    fn new<P: Params>(stmt: &'conn mut rusqlite::Statement, params: P) -> PersonIterator<'conn> {
+        PersonIterator{
+            rows: stmt.query(params).unwrap()
+        }
     }
 }
